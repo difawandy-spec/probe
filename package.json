@@ -1,0 +1,14 @@
+{
+  "name": "sb-reachability-probe",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cek apakah IP datacenter (Railway) masih bisa tembus API + origin playlist. Tanpa signer, tanpa token.",
+  "type": "module",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node index.js"
+  }
+}
