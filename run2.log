@@ -1,3 +1,5 @@
 feed-monitor listening on 3995 | leagues=[{"leagueId":"5072","seasonId":"24773"}] interval=900s
 league 5072: total=1973 inWindow=6
 cycle 6780ms | matches=6 streams=4 samples=8
+league 5072: total=1973 inWindow=6
+cycle 35257ms | matches=6 streams=4 samples=16

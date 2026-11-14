@@ -1,0 +1,3 @@
+feed-monitor listening on 3994 | leagues=[{"leagueId":"5072","seasonId":"24773"}] interval=900s
+league 5072: total=1973 inWindow=6
+cycle 17761ms | matches=8 streams=6 samples=11

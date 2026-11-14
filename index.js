@@ -26,6 +26,11 @@ const LEAGUES = (process.env.WATCH_LEAGUES || '5072:24773')
   });
 const INTERVAL_SEC = parseInt(process.env.INTERVAL_SEC || '300', 10);
 const WINDOW_MIN = parseInt(process.env.WINDOW_MIN || '180', 10); // +- menit dari kickoff
+// matchId spesifik yang mau dipantau terus, tanpa perlu tahu leagueId/seasonId
+const WATCH_MATCHES = (process.env.WATCH_MATCHES || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 const DATA_DIR = process.env.DATA_DIR || ''; // isi kalau mount Railway volume
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
@@ -229,6 +234,20 @@ async function cycle() {
   const now = Date.now();
   let checked = 0, streams = 0;
 
+  // 1) matchId yang dipantau eksplisit
+  for (const matchId of WATCH_MATCHES) {
+    checked++;
+    const list = await streamsOf(matchId);
+    for (const st of list) {
+      streams++;
+      pushSample(await probeStream(st));
+    }
+    if (!list.length) {
+      pushSample({ ts: new Date().toISOString(), matchId: Number(matchId), streamId: null, verdict: 'NO_STREAM_IN_MATCH' });
+    }
+  }
+
+  // 2) penemuan otomatis dari daftar liga
   for (const lg of LEAGUES) {
     const matches = await listMatches(lg);
     const inWindow = matches.filter((m) => m.matchDate && Math.abs(now - m.matchDate) <= WINDOW_MIN * 60 * 1000);
@@ -248,7 +267,7 @@ async function cycle() {
 }
 
 // --------------------------------------------------------------------- server
-const server = http.createServer((rq, rs) => {
+const server = http.createServer(async (rq, rs) => {
   const u = new URL(rq.url, 'http://localhost');
   const json = (code, obj) => {
     rs.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
@@ -256,6 +275,28 @@ const server = http.createServer((rq, rs) => {
   };
 
   if (u.pathname === '/health') return json(200, { ok: true });
+
+  // Cek satu pertandingan saat itu juga, tanpa perlu redeploy.
+  // Contoh: /check?matchId=4524895
+  if (u.pathname === '/check') {
+    const matchId = u.searchParams.get('matchId');
+    if (!matchId) return json(400, { error: 'matchId wajib', contoh: '/check?matchId=4524895' });
+    try {
+      const list = await streamsOf(matchId);
+      if (!list.length) {
+        return json(200, {
+          matchId: Number(matchId), streams: 0,
+          verdict: 'NO_STREAM_IN_MATCH',
+          arti: 'Pertandingan ini tidak sedang disiarkan (atau belum masuk jendela tayang).',
+        });
+      }
+      const rows = [];
+      for (const st of list) rows.push(await probeStream(st));
+      return json(200, { matchId: Number(matchId), streams: rows.length, rows });
+    } catch (e) {
+      return json(500, { error: String(e?.message || e) });
+    }
+  }
 
   if (u.pathname === '/') {
     const rows = [...latest.values()].sort((a, b) => (a.matchId - b.matchId) || String(a.streamId).localeCompare(String(b.streamId)));
@@ -273,7 +314,7 @@ const server = http.createServer((rq, rs) => {
     return json(200, { count: rows.length, rows: rows.slice(-300) });
   }
 
-  return json(404, { error: 'not found', routes: ['/', '/health', '/history?matchId='] });
+  return json(404, { error: 'not found', routes: ['/', '/health', '/history?matchId=', '/check?matchId='] });
 });
 
 server.listen(process.env.PORT || 3000, () => {
