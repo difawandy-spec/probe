@@ -31,6 +31,13 @@ const TARGETS = [
     url: 'http://play.10xstm2.top/hedy/sx_944719/index.m3u8',
     kind: 'text',
   },
+  {
+    // Ambil segmen .ts pertama dari playlist di atas. Ini penentu: kalau 401,
+    // playlist saja tidak cukup untuk memutar apa pun.
+    label: 'segment-head',
+    url: 'http://play.10xstm2.top/hedy/sx_944719/index.m3u8',
+    kind: 'segment',
+  },
 ];
 
 // Ambil string ASCII yang kelihatan dari body protobuf (status/error), tanpa decode penuh.
@@ -84,6 +91,35 @@ async function probe(t) {
       const txt = buf.toString('utf8');
       out.verdict = txt.startsWith('#EXTM3U') ? 'PLAYLIST_OK' : 'NOT_A_PLAYLIST';
       out.hints = txt.split('\n').slice(0, 4);
+      return out;
+    }
+
+    if (t.kind === 'segment') {
+      // res di sini adalah playlist; ambil segmen pertama lalu coba unduh.
+      const txt = buf.toString('utf8');
+      const seg = txt.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
+      if (!seg) {
+        out.verdict = 'PLAYLIST_EMPTY';
+        return out;
+      }
+      const segUrl = new URL(seg, t.url).toString();
+      const segRes = await fetch(segUrl, {
+        headers: { 'User-Agent': UA, 'Referer': t.url, 'Accept': '*/*' },
+        signal: AbortSignal.timeout(20000),
+      });
+      const segBuf = Buffer.from(await segRes.arrayBuffer());
+      out.url = segUrl;
+      out.status = segRes.status;
+      out.contentType = segRes.headers.get('content-type');
+      out.bytes = segBuf.length;
+      out.hints = [
+        'www-authenticate: ' + (segRes.headers.get('www-authenticate') || '-'),
+        'first bytes: ' + segBuf.subarray(0, 8).toString('hex'),
+      ];
+      if (segRes.status === 200 && segBuf[0] === 0x47) out.verdict = 'SEGMENT_OK_TS_STREAM';
+      else if (segRes.status === 200) out.verdict = 'SEGMENT_200_BUT_NOT_TS';
+      else if (segRes.status === 401) out.verdict = 'SEGMENT_401_NEEDS_AUTH';
+      else out.verdict = 'SEGMENT_HTTP_' + segRes.status;
       return out;
     }
 
