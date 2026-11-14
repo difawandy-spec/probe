@@ -1,9 +1,8 @@
 {
-  "name": "feed-monitor",
+  "name": "hls-proxy",
   "version": "1.0.0",
   "private": true,
-  "description": "Monitor observasi feed: match mana punya stream, host CDN mana, playlist/segmen status. Tanpa signer, tanpa bypass.",
-  "type": "module",
+  "description": "Reverse proxy HLS utuh: playlist rewrite + segment passthrough + output M3U untuk IPTV player.",
   "main": "index.js",
   "engines": {
     "node": ">=20"
