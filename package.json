@@ -1,8 +1,8 @@
 {
-  "name": "sb-reachability-probe",
+  "name": "feed-monitor",
   "version": "1.0.0",
   "private": true,
-  "description": "Cek apakah IP datacenter (Railway) masih bisa tembus API + origin playlist. Tanpa signer, tanpa token.",
+  "description": "Monitor observasi feed: match mana punya stream, host CDN mana, playlist/segmen status. Tanpa signer, tanpa bypass.",
   "type": "module",
   "main": "index.js",
   "engines": {
