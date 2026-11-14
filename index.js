@@ -95,6 +95,10 @@ function isPlaylist(url, contentType) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  // Railway (dan mayoritas platform) terminasi TLS di depan, jadi skema asli
+  // harus dibaca dari x-forwarded-proto — kalau tidak, URL di M3U jadi http://.
+  const proto = (req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
+  const origin = `${proto}://${req.headers.host || 'localhost'}`;
 
   const send = (code, type, body, extra = {}) => {
     res.writeHead(code, { 'content-type': type, 'access-control-allow-origin': '*', ...extra });
@@ -107,7 +111,6 @@ const server = http.createServer(async (req, res) => {
 
   // Daftar channel untuk IPTV player
   if (url.pathname === '/iptv.m3u') {
-    const origin = `${url.protocol}//${url.host}`;
     const lines = ['#EXTM3U'];
     for (const ch of LIST) {
       lines.push(`#EXTINF:-1 tvg-id="${ch.id}" tvg-name="${ch.name}" group-title="Proxy",${ch.name}`);
@@ -136,8 +139,7 @@ const server = http.createServer(async (req, res) => {
         if (!up.ok) {
           return send(up.status, 'text/plain', `upstream ${up.status}: ${text.slice(0, 200)}`);
         }
-        const origin = `${url.protocol}//${url.host}`;
-        const body = rewritePlaylist(text, upstream, origin);
+            const body = rewritePlaylist(text, upstream, origin);
         plCache.set(upstream, { at: Date.now(), body });
         if (plCache.size > 200) plCache.delete(plCache.keys().next().value);
         return send(200, 'application/vnd.apple.mpegurl', body, { 'x-proxy-cache': 'MISS' });
@@ -165,9 +167,95 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (url.pathname === '/inspect') {
+    // Periksa satu URL m3u8 yang SUDAH kamu punya: sehat atau tidak, berapa
+    // varian, ada enkripsi atau tidak, dan segmen pertamanya tembus atau 401.
+    // Tidak mengambil URL dari mana pun — inputnya dari kamu.
+    const raw = url.searchParams.get('u');
+    if (!raw) return send(400, 'application/json', JSON.stringify({ error: 'parameter u wajib', contoh: '/inspect?u=https://host/master.m3u8' }));
+    let target = raw;
+    if (!/^https?:\/\//i.test(target)) {
+      try { const d = unb64(raw); if (/^https?:\/\//i.test(d)) target = d; } catch { /* biarkan */ }
+    }
+    if (!/^https?:\/\//i.test(target)) return send(400, 'application/json', JSON.stringify({ error: 'u harus URL http(s)' }));
+
+    const report = { input: target, checkedAt: new Date().toISOString() };
+    try {
+      const up = await fetchUpstream(target);
+      const ct = up.headers.get('content-type') || '';
+      const buf = Buffer.from(await up.arrayBuffer());
+      const head = buf.subarray(0, 1).toString();
+      report.httpStatus = up.status;
+      report.contentType = ct;
+      report.bytes = buf.length;
+
+      if (head === '<') {
+        report.kind = 'html';
+        report.verdict = 'BUKAN_PLAYLIST';
+        report.note = 'Yang dibalas halaman HTML (mis. halaman web atau error CDN), bukan m3u8.';
+        return send(200, 'application/json', JSON.stringify(report, null, 2));
+      }
+
+      if (!buf.subarray(0, 7).toString().startsWith('#EXTM3U')) {
+        report.kind = 'binary';
+        report.verdict = buf[0] === 0x47 ? 'SEGMEN_TS' : 'BUKAN_PLAYLIST';
+        report.note = 'Isinya media, bukan playlist. Pakai URL master/media m3u8.';
+        return send(200, 'application/json', JSON.stringify(report, null, 2));
+      }
+
+      const text = buf.toString('utf8');
+      const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const variants = lines.filter((l) => l.startsWith('#EXT-X-STREAM-INF')).map((l) => {
+        const bw = /BANDWIDTH=(\d+)/.exec(l)?.[1];
+        const res = /RESOLUTION=([0-9x]+)/.exec(l)?.[1];
+        const name = /NAME="([^"]+)"/.exec(l)?.[1];
+        return { bandwidth: bw ? Number(bw) : null, resolution: res || null, name: name || null };
+      });
+      const segs = lines.filter((l) => l && !l.startsWith('#'));
+      const keyLines = lines.filter((l) => l.startsWith('#EXT-X-KEY'));
+      report.kind = variants.length ? 'master' : 'media';
+      report.variants = variants.length;
+      report.variantList = variants;
+      report.encryption = keyLines.length ? keyLines.map((l) => /METHOD=([A-Z0-9-]+)/.exec(l)?.[1] || 'UNKNOWN') : 'none';
+      report.targetDuration = Number(/TARGETDURATION:(\d+)/.exec(text)?.[1] || 0) || null;
+
+      if (report.kind === 'media') {
+        report.segmentsInPlaylist = segs.length;
+        const first = segs[0];
+        if (first) {
+          let segUrl;
+          try { segUrl = new URL(first, target).toString(); } catch { segUrl = first; }
+          const sr = await fetchUpstream(segUrl, { Range: 'bytes=0-2047' });
+          const sb = Buffer.from(await sr.arrayBuffer());
+          report.firstSegment = {
+            httpStatus: sr.status,
+            contentType: sr.headers.get('content-type'),
+            bytes: sb.length,
+            tsSync: sb[0] === 0x47,
+            wwwAuthenticate: sr.headers.get('www-authenticate') || null,
+          };
+          if ((sr.status === 200 || sr.status === 206) && sb[0] === 0x47) report.verdict = 'PLAYABLE';
+          else if (sr.status === 401 || sr.status === 403) report.verdict = `SEGMEN_TERKUNCI_${sr.status}`;
+          else report.verdict = `SEGMEN_HTTP_${sr.status}`;
+        } else {
+          report.verdict = 'PLAYLIST_KOSONG';
+        }
+      } else {
+        report.verdict = 'MASTER_OK_PILIH_VARIAN';
+      }
+
+      report.proxyLink = `${origin}/hls?u=${b64(target)}`;
+      return send(200, 'application/json', JSON.stringify(report, null, 2));
+    } catch (err) {
+      report.verdict = 'ERROR';
+      report.error = String(err?.message || err);
+      return send(502, 'application/json', JSON.stringify(report, null, 2));
+    }
+  }
+
   return send(404, 'application/json', JSON.stringify({
     error: 'not found',
-    routes: ['/iptv.m3u', '/hls?u=<base64url>', '/health'],
+    routes: ['/iptv.m3u', '/hls?u=<base64url>', '/inspect?u=<url>', '/health'],
   }));
 });
 
